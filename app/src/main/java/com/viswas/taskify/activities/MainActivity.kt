@@ -85,6 +85,9 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
 
         setupActionBar()
         navView.setNavigationItemSelectedListener(this)
+        val auth = FirebaseAuth.getInstance()
+        val currentUser = auth.currentUser
+        Log.d("MainActivity", "Current User UID: ${currentUser?.uid ?: "Not signed in"}")
         FireStore().loadUserData(this)
 
         // Initialize the LuggageDetector
@@ -172,24 +175,24 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
             if (bitmap != null) {
                 // Create InputImage for text recognition
                 val image = InputImage.fromBitmap(bitmap, imageProxy.imageInfo.rotationDegrees)
-                
+
                 // Perform luggage detection with TFLite
                 val detectedLuggage = luggageDetector.detectLuggage(bitmap)
-                
+
                 // Log luggage detection results
                 Log.d("MainActivity", "LUGGAGE DETECTION: Detected ${detectedLuggage.size} luggage items")
-                
+
                 // Log details of each detected luggage item
                 detectedLuggage.forEachIndexed { index, luggage ->
                     Log.d("MainActivity", "LUGGAGE DETECTION: Item $index - Type: ${luggage.type}, Bounds: ${luggage.boundingBox}, Confidence: ${luggage.confidence}")
                 }
-                
+
                 // Now proceed with text recognition using ML Kit
                 textRecognizer.process(image)
                     .addOnSuccessListener { visionText ->
                         Log.d("MainActivity", "TEXT RECOGNITION: Found text: ${visionText.text}")
                         var uidFound = false
-                        
+
                         val fullTextMatcher = UID_PATTERN.matcher(visionText.text.replace("\\s+".toRegex(), ""))
                         if (fullTextMatcher.find()) {
                             val detectedUid = fullTextMatcher.group()
@@ -199,7 +202,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                         } else {
                             for (block in visionText.textBlocks) {
                                 Log.d("MainActivity", "TEXT RECOGNITION: Text block: ${block.text}")
-                                
+
                                 val blockText = block.text.replace("\\s+".toRegex(), "")
                                 val blockMatcher = UID_PATTERN.matcher(blockText)
                                 if (blockMatcher.find()) {
@@ -209,7 +212,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                     uidFound = true
                                     break
                                 }
-                                
+
                                 for (line in block.lines) {
                                     Log.d("MainActivity", "TEXT RECOGNITION: Line: ${line.text}")
                                     val lineText = line.text.replace("\\s+".toRegex(), "")
@@ -221,7 +224,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                         uidFound = true
                                         break
                                     }
-                                    
+
                                     for (element in line.elements) {
                                         val elementText = element.text.replace("\\s+".toRegex(), "")
                                         if (elementText.length >= 7) {
@@ -240,11 +243,11 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                 if (uidFound) break
                             }
                         }
-                        
+
                         // If no UID found in text, try to recognize text in each luggage's bounding box
                         if (!uidFound && detectedLuggage.isNotEmpty()) {
                             var itemsProcessed = 0
-                            
+
                             for (luggage in detectedLuggage) {
                                 try {
                                     val boundingBox = luggage.boundingBox
@@ -259,7 +262,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                             boundingBox.width().toInt(),
                                             boundingBox.height().toInt()
                                         )
-                                        
+
                                         // Process the cropped image for text
                                         val croppedImage = InputImage.fromBitmap(croppedBitmap, 0)
                                         textRecognizer.process(croppedImage)
@@ -272,7 +275,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                                     Log.d("MainActivity", "TEXT RECOGNITION: Found UID in ${luggage.type}: $detectedUid")
                                                     verifyLuggageAndShowResult(detectedUid, bitmap)
                                                 }
-                                                
+
                                                 itemsProcessed++
                                                 if (itemsProcessed >= detectedLuggage.size) {
                                                     imageProxy.close()
@@ -383,33 +386,49 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
     private fun verifyLuggageAndShowResult(detectedUid: String, detectedBitmap: Bitmap?) {
         if (!isScanning) {  // Prevent multiple simultaneous verifications
             isScanning = true
-            FireStore().getLuggageByUid(detectedUid) { luggage ->
+            val normalizedUid = detectedUid.uppercase()
+            Log.d("MainActivity", "Verifying luggage with normalized UID: $normalizedUid")
+            FireStore().getLuggageByUid(normalizedUid) { luggage ->
                 if (luggage != null) {
-                    // Get user details from the email
-                    FireStore().getUserByEmail(luggage.email) { user ->
-                        if (user != null) {
-                            runOnUiThread {
-                                // Stop scanning
-                                cameraProvider?.unbindAll()
-                                previewView.visibility = View.GONE
+                    val authEmail = FirebaseAuth.getInstance().currentUser?.email
+                    if (luggage.email == authEmail) {
+                        FireStore().getUserByEmail(luggage.email) { user ->
+                            if (user != null) {
+                                runOnUiThread {
+                                    // Stop scanning
+                                    cameraProvider?.unbindAll()
+                                    previewView.visibility = View.GONE
 
-                                // Save the detected bitmap to cache and get the file path
-                                val imagePath = detectedBitmap?.let { saveBitmapToCache(it) }
+                                    // Save the detected bitmap to cache and get the file path
+                                    val imagePath = detectedBitmap?.let { saveBitmapToCache(it) }
 
-                                // Launch ResultActivity with added extra for object image
-                                val intent = Intent(this, ResultActivity::class.java).apply {
-                                    putExtra("USER_NAME", user.name)
-                                    putExtra("LUGGAGE_UID", detectedUid)
-                                    putExtra("OBJECT_IMAGE_PATH", imagePath)
+                                    // Launch ResultActivity with added extra for object image
+                                    val intent = Intent(this, ResultActivity::class.java).apply {
+                                        putExtra("USER_NAME", user.name)
+                                        putExtra("LUGGAGE_UID", normalizedUid)
+                                        putExtra("OBJECT_IMAGE_PATH", imagePath)
+                                    }
+                                    startActivity(intent)
+                                    isScanning = false
                                 }
-                                startActivity(intent)
+                            } else {
+                                runOnUiThread {
+                                    Toast.makeText(this, "User data not found", Toast.LENGTH_SHORT).show()
+                                    isScanning = false
+                                }
                             }
-                        } else {
-                            isScanning = false  // Reset if user not found
+                        }
+                    } else {
+                        runOnUiThread {
+                            Toast.makeText(this, "This luggage belongs to another user", Toast.LENGTH_SHORT).show()
+                            isScanning = false
                         }
                     }
                 } else {
-                    isScanning = false  // Reset if luggage not found
+                    runOnUiThread {
+                        Toast.makeText(this, "No luggage found with UID: $normalizedUid", Toast.LENGTH_SHORT).show()
+                        isScanning = false
+                    }
                 }
             }
         }
